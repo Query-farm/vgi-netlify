@@ -1,0 +1,525 @@
+# name: test/sql/netlify.test
+# description: SQL tests for the netlify worker against the offline Netlify replay server (test/mock_api/server.py)
+# group: [netlify]
+
+require vgi
+
+require-env NETLIFY_WORKER
+
+require-env NETLIFY_FIXTURE_URL
+
+# httpfs + json read the replay server's /__requests log to assert what was pushed down.
+statement ok
+LOAD httpfs;
+
+statement ok
+LOAD json;
+
+statement ok
+ATTACH 'netlify' (TYPE vgi, LOCATION '{NETLIFY_WORKER}');
+
+# ---------------------------------------------------------------- secret errors
+
+statement error
+SELECT count(*) FROM netlify.main.sites;
+----
+<REGEX>:.*no netlify secret.*
+
+statement ok
+CREATE SECRET netlify_bad (TYPE netlify, TOKEN 'wrong-token', BASE_URL '{NETLIFY_FIXTURE_URL}/api/v1');
+
+statement error
+SELECT count(*) FROM netlify.main.sites;
+----
+<REGEX>:.*HTTP 401.*Access Denied.*
+
+statement ok
+DROP SECRET netlify_bad;
+
+statement ok
+CREATE SECRET netlify_insecure (TYPE netlify, TOKEN 'x', BASE_URL 'http://api.netlify.com/api/v1');
+
+statement error
+SELECT count(*) FROM netlify.main.sites;
+----
+<REGEX>:.*https.*
+
+statement ok
+DROP SECRET netlify_insecure;
+
+statement ok
+CREATE SECRET netlify_fixture (TYPE netlify, TOKEN 'test-token', BASE_URL '{NETLIFY_FIXTURE_URL}/api/v1');
+
+# ---------------------------------------------------------------------- accounts
+
+query TTTII
+SELECT id, slug, type_name, sites_used, collaborators_used FROM netlify.main.accounts ORDER BY slug;
+----
+acc0acme000000000000001	acme	Pro	2	3
+acc0personal0000000002	grace	Starter	1	1
+
+# ------------------------------------------------------------------------- sites
+
+query TTTTTTTT
+SELECT name, custom_domain, repo, repo_provider, production_branch, build_command, publish_dir, framework FROM netlify.main.sites ORDER BY name;
+----
+acme-docs	docs.acme.dev	acme/docs	gitlab	trunk	hugo	public	hugo
+acme-web	www.acme.dev	acme/web	github	main	npm run build	dist	astro
+hobby-blog	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+
+query TTTTT
+SELECT name, ssl, force_ssl, managed_dns, password_protected FROM netlify.main.sites ORDER BY name;
+----
+acme-docs	true	false	false	true
+acme-web	true	true	true	false
+hobby-blog	true	true	false	false
+
+query T
+SELECT published_deploy_id FROM netlify.main.sites WHERE name = 'acme-web';
+----
+665000000000000000000002
+
+# name = '…' is pushed into the list call; the SDK keeps the exact match.
+query T
+SELECT query::JSON->>'name' FROM read_json('{NETLIFY_FIXTURE_URL}/__requests?path=/api/v1/sites') ORDER BY seq DESC LIMIT 1;
+----
+acme-web
+
+# account_slug switches to GET /{account_slug}/sites.
+query T
+SELECT name FROM netlify.main.sites WHERE account_slug = 'grace';
+----
+hobby-blog
+
+query I
+SELECT count(*) FROM read_json('{NETLIFY_FIXTURE_URL}/__requests?path=/api/v1/grace/sites');
+----
+1
+
+# No secret ever reaches a column: site password, deploy hook, build env values.
+query I
+SELECT count(*) FROM (SELECT to_json(s)::VARCHAR AS j FROM netlify.main.sites s) WHERE j LIKE '%SECRET%';
+----
+0
+
+# ---------------------------------------------------------------------- projects
+
+query TTTTTTTT
+SELECT platform, name, framework, repo, repo_provider, production_branch, root_directory, production_url FROM netlify.main.projects ORDER BY name;
+----
+netlify	acme-docs	hugo	acme/docs	gitlab	trunk	site	https://docs.acme.dev
+netlify	acme-web	astro	acme/web	github	main	NULL	https://www.acme.dev
+netlify	hobby-blog	NULL	NULL	NULL	NULL	NULL	https://hobby-blog.netlify.app
+
+# ----------------------------------------------------------------------- domains
+
+query TTT
+SELECT project, domain, kind FROM netlify.main.domains ORDER BY project, domain;
+----
+acme-docs	acme-docs.netlify.app	netlify_subdomain
+acme-docs	docs.acme.dev	primary
+acme-web	acme-web.netlify.app	netlify_subdomain
+acme-web	acme.dev	alias
+acme-web	acme.io	alias
+acme-web	branches.acme.dev	branch_deploy
+acme-web	www.acme.dev	primary
+hobby-blog	hobby-blog.netlify.app	netlify_subdomain
+
+# ------------------------------------------------------------------- deployments
+
+# The shared web-deploy vocabulary: these 16 columns in this order.
+query TT
+SELECT column_name, column_type FROM (DESCRIBE netlify.main.deployments) LIMIT 16;
+----
+platform	VARCHAR
+id	VARCHAR
+project	VARCHAR
+environment	VARCHAR
+state	VARCHAR
+raw_state	VARCHAR
+branch	VARCHAR
+commit_sha	VARCHAR
+commit_message	VARCHAR
+creator	VARCHAR
+created_at	TIMESTAMP WITH TIME ZONE
+building_at	TIMESTAMP WITH TIME ZONE
+ready_at	TIMESTAMP WITH TIME ZONE
+build_duration_seconds	DOUBLE
+url	VARCHAR
+inspector_url	VARCHAR
+
+# Every deploy of every site; acme-web's 250 deploys take three pages.
+query TTI
+SELECT project, state, count(*) FROM netlify.main.deployments GROUP BY ALL ORDER BY ALL;
+----
+acme-docs	error	1
+acme-docs	ready	2
+acme-web	building	1
+acme-web	canceled	11
+acme-web	error	25
+acme-web	queued	1
+acme-web	ready	212
+hobby-blog	ready	1
+
+query I
+SELECT count(*) FROM read_json('{NETLIFY_FIXTURE_URL}/__requests?path=/api/v1/sites/site-0001-acme-web/deploys') WHERE query = '{"page": "3", "per_page": "100"}';
+----
+1
+
+# Pushdown: environment + state + one site → production=true&state=ready on that site only.
+query TIR
+SELECT project, count(*), round(avg(build_duration_seconds), 2) FROM netlify.main.deployments WHERE project = 'acme-web' AND environment = 'production' AND state = 'ready' GROUP BY project;
+----
+acme-web	119	74.79
+
+query T
+SELECT query FROM read_json('{NETLIFY_FIXTURE_URL}/__requests?path=/api/v1/sites/site-0001-acme-web/deploys') ORDER BY seq DESC LIMIT 1;
+----
+{"page": "2", "per_page": "100", "production": "true", "state": "ready"}
+
+# The site was found by name, not by listing every site.
+query T
+SELECT query::JSON->>'name' FROM read_json('{NETLIFY_FIXTURE_URL}/__requests?path=/api/v1/sites') ORDER BY seq DESC LIMIT 1;
+----
+acme-web
+
+# state = 'error' covers two raw states (error, rejected): one request each.
+query I
+SELECT count(*) FROM netlify.main.deployments WHERE project_id = 'site-0001-acme-web' AND state = 'error' AND branch = 'beta';
+----
+13
+
+query T
+SELECT list(query::JSON->>'state' ORDER BY seq) FROM (SELECT * FROM read_json('{NETLIFY_FIXTURE_URL}/__requests?path=/api/v1/sites/site-0001-acme-web/deploys') ORDER BY seq DESC LIMIT 2);
+----
+[error, rejected]
+
+query T
+SELECT DISTINCT query::JSON->>'branch' FROM (SELECT * FROM read_json('{NETLIFY_FIXTURE_URL}/__requests?path=/api/v1/sites/site-0001-acme-web/deploys') ORDER BY seq DESC LIMIT 2);
+----
+beta
+
+# canceled comes from error_message, not from state: nothing is pushed, still exact.
+query I
+SELECT count(*) FROM netlify.main.deployments WHERE project_id = 'site-0001-acme-web' AND state = 'canceled';
+----
+11
+
+# A created_at lower bound stops paging early: deploys are newest first, so the first
+# page already passes 2026-11-01 and page 2 is never requested.
+query I
+SELECT count(*) FROM netlify.main.deployments WHERE project = 'acme-web' AND created_at >= TIMESTAMPTZ '2026-11-01 00:00:00+00';
+----
+55
+
+query I
+SELECT max((query::JSON->>'page')::INT) FROM (SELECT * FROM read_json('{NETLIFY_FIXTURE_URL}/__requests?path=/api/v1/sites/site-0001-acme-web/deploys') ORDER BY seq DESC LIMIT 1);
+----
+1
+
+# Derived timings and URLs of one finished deploy.
+query TTTTTRT
+SELECT id, environment, state, commit_message, creator, build_duration_seconds, url FROM netlify.main.deployments WHERE project_id = 'site-0002-acme-docs' AND id = 'docs00000000000000000001';
+----
+docs00000000000000000001	production	ready	Add search page	Grace	55.0	https://docs00000000000000000001--acme-docs.netlify.app
+
+query TTT
+SELECT ready_at, building_at, inspector_url FROM netlify.main.deployments WHERE project_id = 'site-0002-acme-docs' AND id = 'docs00000000000000000001';
+----
+2026-11-10 08:01:00+00	2026-11-10 08:00:05+00	https://app.netlify.com/sites/acme-docs/deploys/docs00000000000000000001
+
+# Unknown site → no rows, not an error.
+query I
+SELECT count(*) FROM netlify.main.deployments WHERE project_id = 'no-such-site';
+----
+0
+
+# ------------------------------------------------------------------------ deploy
+
+query TTTITT
+SELECT id, state, summary_status, function_count, function_names, function_schedules FROM netlify.main.deploy('docs00000000000000000001');
+----
+docs00000000000000000001	ready	ready	1	[search]	[{'name': reindex, 'cron': @daily}]
+
+query I
+SELECT count(*) FROM netlify.main.deploy('nope');
+----
+0
+
+# -------------------------------------------------------------------- build_logs
+
+query ITTT
+SELECT line, type, step, replace(text, chr(10), ' | ') FROM netlify.main.build_logs('docs00000000000000000002') ORDER BY line;
+----
+1	info	2 redirect rules processed	All redirect rules deployed without errors.
+2	warning	Hugo version is deprecated	Pin HUGO_VERSION in netlify.toml. | Using 0.111.0
+3	error	deploy	Build script returned non-zero exit code: 255
+
+# ------------------------------------------------------------------------ builds
+
+query TTT
+SELECT id, deploy_id, done FROM netlify.main.builds WHERE site = 'acme-docs' ORDER BY id;
+----
+bld-docs-1	docs00000000000000000001	true
+bld-docs-2	docs00000000000000000002	true
+
+query II
+SELECT count(*), count(*) FILTER (WHERE error IS NOT NULL) FROM netlify.main.builds WHERE site_id = 'site-0001-acme-web';
+----
+250	35
+
+# ------------------------------------------------------------------ build_stats
+
+query TIIII
+SELECT account_slug, active_builds, enqueued, minutes_current, included_minutes FROM netlify.main.build_stats ORDER BY account_slug;
+----
+acme	1	1	240	25000
+grace	0	0	0	300
+
+query I
+SELECT count(*) FROM netlify.main.build_stats WHERE account_slug = 'grace';
+----
+1
+
+# ------------------------------------------------------------------------- forms
+
+query TTIT
+SELECT site, name, submission_count, fields FROM netlify.main.forms ORDER BY site, name;
+----
+acme-docs	feedback	1	[{'name': helpful, 'type': checkbox}]
+acme-web	contact	5	[{'name': email, 'type': email}, {'name': message, 'type': textarea}]
+acme-web	newsletter	2	[{'name': email, 'type': email}]
+
+# Submissions: metadata only by default — no PII.
+query ITTT
+SELECT number, site_url, email, body FROM netlify.main.form_submissions('form-contact') ORDER BY number;
+----
+1	https://www.acme.dev	NULL	NULL
+2	https://www.acme.dev	NULL	NULL
+3	https://www.acme.dev	NULL	NULL
+4	https://www.acme.dev	NULL	NULL
+5	https://www.acme.dev	NULL	NULL
+
+query ITT
+SELECT number, email, data->>'message' FROM netlify.main.form_submissions('form-contact', include_contents := true) WHERE number = 5;
+----
+5	eve@example.com	What does it cost?
+
+query I
+SELECT count(*) FROM netlify.main.form_submissions('no-such-form');
+----
+0
+
+# --------------------------------------------------------------------- functions
+
+query TTTI
+SELECT site, name, runtime, size_bytes FROM netlify.main.functions ORDER BY site, name;
+----
+acme-docs	search	js	20480
+acme-web	checkout	js	102400
+acme-web	image-resize	go	4096000
+
+# ---------------------------------------------------------------------------- DNS
+
+# The first /dns_zones request answers 429 + Retry-After; the client waits and retries.
+query TTII
+SELECT name, dns_servers[1], record_count, len(errors) FROM netlify.main.dns_zones ORDER BY name;
+----
+acme.dev	dns1.p01.nsone.net	5	0
+acme.io	dns3.p01.nsone.net	1	1
+
+query I
+SELECT count(*) FROM read_json('{NETLIFY_FIXTURE_URL}/__requests?path=/api/v1/dns_zones');
+----
+2
+
+query TTTTII
+SELECT domain, id, name, type, ttl, mx_priority FROM netlify.main.dns_records ORDER BY domain, id;
+----
+acme.dev	rec-1	(empty)	NETLIFY	3600	NULL
+acme.dev	rec-2	www	NETLIFY	3600	NULL
+acme.dev	rec-3	(empty)	MX	3600	10
+acme.dev	rec-4	(empty)	CAA	3600	NULL
+acme.dev	rec-5	_dmarc	TXT	300	NULL
+acme.io	rec-6	(empty)	A	3600	NULL
+
+query T
+SELECT value FROM netlify.main.dns_records WHERE domain = 'acme.io';
+----
+75.2.60.5
+
+query T
+SELECT tag FROM netlify.main.dns_records WHERE zone_id = 'zone-acme-dev' AND type = 'CAA';
+----
+issue
+
+# ---------------------------------------------------------------- ssl_certificates
+
+# hobby-blog has no certificate (404) → no row.
+query TTT
+SELECT site, state, expires_at FROM netlify.main.ssl_certificates ORDER BY expires_at;
+----
+acme-web	issued	2026-11-30 00:00:00+00
+acme-docs	issued	2026-12-30 00:00:00+00
+
+# ------------------------------------------------------------------ env_var_names
+
+query TTTTTI
+SELECT project, key, targets, type, git_branch, value_count FROM netlify.main.env_var_names ORDER BY project, key;
+----
+acme-docs	PUBLIC_API_URL	[production]	plain	NULL	1
+acme-web	FEATURE_FLAG	[preview, development]	plain	beta	2
+acme-web	PUBLIC_API_URL	[production, preview, development]	plain	NULL	1
+acme-web	STRIPE_SECRET_KEY	[production, preview]	secret	NULL	2
+
+# Values are never emitted, secret or not.
+query I
+SELECT count(*) FROM (SELECT to_json(e)::VARCHAR AS j FROM netlify.main.env_var_names e) WHERE j LIKE '%ENV_VALUE_SECRET%' OR j LIKE '%sk_%';
+----
+0
+
+query I
+SELECT count(*) FROM netlify.main.env_var_names WHERE project_id = 'site-0002-acme-docs';
+----
+1
+
+query T
+SELECT query FROM read_json('{NETLIFY_FIXTURE_URL}/__requests?path=/api/v1/accounts/acc0acme000000000000001/env') ORDER BY seq DESC LIMIT 1;
+----
+{"site_id": "site-0002-acme-docs"}
+
+# ------------------------------------------------------------------------- hooks
+
+query TTTTT
+SELECT site, id, event, disabled, target_host FROM netlify.main.hooks ORDER BY id;
+----
+acme-web	hook-1	deploy_failed	false	hooks.slack.example.com
+acme-web	hook-2	deploy_created	true	NULL
+acme-web	hook-3	submission_created	false	crm.example.net
+acme-docs	hook-4	deploy_failed	false	alerts.example.org
+
+query T
+SELECT site FROM netlify.main.hooks WHERE event = 'deploy_failed' AND site = 'acme-docs';
+----
+acme-docs
+
+query T
+SELECT query FROM read_json('{NETLIFY_FIXTURE_URL}/__requests?path=/api/v1/hooks') ORDER BY seq DESC LIMIT 1;
+----
+{"event": "deploy_failed", "site_id": "site-0002-acme-docs"}
+
+query TTT
+SELECT site, title, url_host FROM netlify.main.build_hooks ORDER BY site;
+----
+acme-web	CMS publish	api.netlify.com
+
+query I
+SELECT count(*) FROM (SELECT to_json(h)::VARCHAR AS j FROM netlify.main.hooks h UNION ALL SELECT to_json(b)::VARCHAR FROM netlify.main.build_hooks b) WHERE j LIKE '%SECRET%' OR j LIKE '%@%';
+----
+0
+
+# ------------------------------------------------------------------- split_tests
+
+query TTTR
+SELECT site, name, b.branch, b.percentage FROM netlify.main.split_tests, unnest(branches) AS u(b) WHERE active ORDER BY b.percentage DESC;
+----
+acme-web	pricing test	main	80.0
+acme-web	pricing test	pricing-b	20.0
+
+# ------------------------------------------------------------------ team_members
+
+query TTTT
+SELECT team_id, name, email, role FROM netlify.main.team_members WHERE account_slug = 'acme' ORDER BY name;
+----
+acc0acme000000000000001	Ada Lovelace	ada@acme.dev	Owner
+acc0acme000000000000001	Alan Turing	alan@acme.dev	Collaborator
+acc0acme000000000000001	Grace Hopper	grace@acme.dev	Developer
+
+query I
+SELECT count(*) FROM netlify.main.team_members;
+----
+4
+
+# --------------------------------------------------------------------- audit_events
+
+# grace's plan has no audit log (403) → no rows, not an error.
+query TTT
+SELECT account_slug, actor_name, action FROM netlify.main.audit_events WHERE timestamp >= TIMESTAMPTZ '2026-11-01 00:00:00+00' ORDER BY timestamp;
+----
+acme	Ada Lovelace	member.invited
+acme	Grace Hopper	env_var.updated
+acme	Ada Lovelace	deploy.locked
+
+query TT
+SELECT action, payload->>'key' FROM netlify.main.audit_events WHERE account_id = 'acc0acme000000000000001' AND log_type = 'audit' AND action = 'env_var.updated';
+----
+env_var.updated	PUBLIC_API_URL
+
+query T
+SELECT query::JSON->>'log_type' FROM read_json('{NETLIFY_FIXTURE_URL}/__requests?path=/api/v1/accounts/acc0acme000000000000001/audit') ORDER BY seq DESC LIMIT 1;
+----
+audit
+
+query I
+SELECT count(*) FROM netlify.main.audit_events WHERE log_type = 'security';
+----
+1
+
+# ------------------------------------------------------------------ unified.runs
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE netlify.unified.runs);
+----
+orchestrator	VARCHAR
+run_id	VARCHAR
+pipeline	VARCHAR
+status	VARCHAR
+raw_status	VARCHAR
+trigger	VARCHAR
+queued_at	TIMESTAMP WITH TIME ZONE
+started_at	TIMESTAMP WITH TIME ZONE
+ended_at	TIMESTAMP WITH TIME ZONE
+duration_seconds	DOUBLE
+url	VARCHAR
+
+query TI
+SELECT status, count(*) FROM netlify.unified.runs GROUP BY status ORDER BY status;
+----
+cancelled	10
+failed	26
+queued	1
+running	1
+skipped	1
+success	215
+
+query TTTT
+SELECT orchestrator, pipeline, status, trigger FROM netlify.unified.runs WHERE pipeline = 'hobby-blog';
+----
+netlify	hobby-blog	success	manual
+
+query I
+SELECT count(*) FROM netlify.unified.runs WHERE pipeline = 'acme-docs' AND status = 'failed';
+----
+1
+
+query T
+SELECT query FROM read_json('{NETLIFY_FIXTURE_URL}/__requests?path=/api/v1/sites/site-0002-acme-docs/deploys') ORDER BY seq DESC LIMIT 2;
+----
+{"page": "1", "per_page": "100", "state": "rejected"}
+{"page": "1", "per_page": "100", "state": "error"}
+
+# --------------------------------------------------------- strict replay
+
+# Every request the worker made carried only documented parameters (an unknown one is a
+# 422) — the only non-200 answers are the deliberate 401 / 429 / 403 / 404 cases.
+query TI
+SELECT status, count(*) > 0 FROM read_json('{NETLIFY_FIXTURE_URL}/__requests?prefix=/api/v1/') GROUP BY status ORDER BY status;
+----
+200	true
+401	true
+403	true
+404	true
+429	true
+
+statement ok
+DETACH netlify;

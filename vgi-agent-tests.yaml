@@ -1,0 +1,68 @@
+# Private graders for the public vgi.agent_test_tasks in the worker's catalog metadata.
+# `vgi-lint lint --ai` runs an agent on each prompt and grades it (VGI920).
+#
+# Every netlify relation needs a `netlify` secret pointing at a Netlify account (the offline
+# replay account in test/mock_api/server.py works too: TOKEN 'test-token', BASE_URL
+# 'http://127.0.0.1:<port>/api/v1'). The replay data is static, so every task compares
+# against a reference query.
+tasks:
+  - name: failed_deploys
+    reference_sql: >-
+      SELECT project, id FROM netlify.main.deployments WHERE state = 'error' ORDER BY project, id
+  - name: production_build_time
+    reference_sql: >-
+      SELECT project, avg(build_duration_seconds) AS avg_build_seconds FROM netlify.main.deployments
+      WHERE environment = 'production' AND state = 'ready' GROUP BY project ORDER BY project
+  - name: custom_domains_no_force_ssl
+    reference_sql: >-
+      SELECT name FROM netlify.main.sites WHERE custom_domain IS NOT NULL AND NOT force_ssl ORDER BY name
+  - name: cert_expiry
+    reference_sql: SELECT site, expires_at FROM netlify.main.ssl_certificates ORDER BY expires_at LIMIT 1
+  - name: env_var_count
+    reference_sql: >-
+      SELECT project, count(*) AS variables FROM netlify.main.env_var_names GROUP BY project ORDER BY project
+  - name: busiest_form
+    reference_sql: SELECT site, name, submission_count FROM netlify.main.forms ORDER BY submission_count DESC LIMIT 1
+  - name: team_owners
+    reference_sql: SELECT name, email FROM netlify.main.team_members WHERE role = 'Owner' ORDER BY name
+  - name: run_status_counts
+    reference_sql: SELECT status, count(*) AS runs FROM netlify.unified.runs GROUP BY status ORDER BY status
+  - name: account_plans
+    reference_sql: SELECT slug, type_name, sites_used FROM netlify.main.accounts ORDER BY slug
+  - name: security_audit_events
+    reference_sql: >-
+      SELECT timestamp, actor_name, action FROM netlify.main.audit_events
+      WHERE account_slug = 'acme' AND log_type = 'security' ORDER BY timestamp
+  - name: build_hook_branches
+    reference_sql: SELECT title, branch FROM netlify.main.build_hooks WHERE site = 'acme-web' ORDER BY title
+  - name: failed_deploy_messages
+    reference_sql: >-
+      SELECT line, type, step, text FROM netlify.main.build_logs('docs00000000000000000002')
+      WHERE type IN ('warning', 'error') ORDER BY line
+  - name: build_minutes_used
+    reference_sql: SELECT account_slug, minutes_current FROM netlify.main.build_stats ORDER BY account_slug
+  - name: failed_builds
+    reference_sql: SELECT count(*) AS failed FROM netlify.main.builds WHERE site = 'acme-docs' AND error IS NOT NULL
+  - name: deploy_functions
+    reference_sql: SELECT unnest(function_names) AS name FROM netlify.main.deploy('docs00000000000000000001') ORDER BY name
+  - name: mx_records
+    reference_sql: SELECT domain, value, mx_priority FROM netlify.main.dns_records WHERE type = 'MX' ORDER BY domain, value
+  - name: zone_nameservers
+    reference_sql: SELECT name, dns_servers FROM netlify.main.dns_zones ORDER BY name
+  - name: domain_aliases
+    reference_sql: SELECT project, domain FROM netlify.main.domains WHERE kind = 'alias' ORDER BY project, domain
+  - name: contact_form_submissions
+    reference_sql: >-
+      SELECT count(*) AS submissions FROM netlify.main.form_submissions('form-contact')
+      WHERE created_at >= TIMESTAMPTZ '2026-11-01 00:00:00+00' AND created_at < TIMESTAMPTZ '2026-12-01 00:00:00+00'
+  - name: go_functions
+    reference_sql: SELECT site, name FROM netlify.main.functions WHERE runtime = 'go' ORDER BY site, name
+  - name: failure_notifications
+    reference_sql: >-
+      SELECT DISTINCT target_host FROM netlify.main.hooks WHERE event = 'deploy_failed' AND NOT disabled ORDER BY target_host
+  - name: projects_by_provider
+    reference_sql: SELECT repo_provider, count(*) AS projects FROM netlify.main.projects GROUP BY repo_provider ORDER BY repo_provider
+  - name: active_split_tests
+    reference_sql: >-
+      SELECT site, name, b.branch, b.percentage FROM netlify.main.split_tests, unnest(branches) AS u(b)
+      WHERE active ORDER BY site, name, b.percentage DESC

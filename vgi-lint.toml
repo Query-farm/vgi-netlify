@@ -1,0 +1,60 @@
+# vgi-lint settings for this worker: https://github.com/Query-farm/vgi-lint-check
+# `make lint-explain`, `vgi-lint lint` in this directory, and CI's metadata job all
+# read this file. Look up a rule with `vgi-lint explain VGI123`; print the metadata tag
+# contract with `vgi-lint spec`.
+
+# The worker to attach, relative to this directory. Build it first with `make build`.
+location = "bin/vgi-netlify-worker"
+
+# Gate at "info": every finding fails.
+fail_on = "info"
+
+# Waive a finding only with a kind and a reason, so the waiver can be audited:
+#   domain-exemption  permanent and legitimate for this worker
+#   deferred          a real defect you will fix; add expires = "YYYY-MM-DD"
+#   timing            slow or flaky because of the environment, not the metadata
+#   tooling-bug       the linter is wrong; report it upstream
+ignore = [
+  # { code = "VGI146", kind = "domain-exemption", reason = "every entry point needs a key" },
+]
+
+# Adopting the gate on a worker that already has findings? Record them once with
+#   vgi-lint lint --baseline vgi-lint-baseline --update-baseline
+# and uncomment the next line. Only new findings fail after that.
+# baseline = "vgi-lint-baseline"
+
+
+[per_object."netlify.main.audit_events"]
+ignore = [{ code = "VGI808", kind = "domain-exemption", reason = "the id column comes from a separate API call than accounts; a account can be deleted between scans, so the reference cannot be attested ENFORCED (the SDK refuses METADATA_ONLY foreign keys)" }]
+[per_object."netlify.main.build_hooks"]
+ignore = [{ code = "VGI808", kind = "domain-exemption", reason = "the id column comes from a separate API call than sites; a site can be deleted between scans, so the reference cannot be attested ENFORCED (the SDK refuses METADATA_ONLY foreign keys)" }]
+[per_object."netlify.main.build_stats"]
+ignore = [{ code = "VGI808", kind = "domain-exemption", reason = "the id column comes from a separate API call than accounts; a account can be deleted between scans, so the reference cannot be attested ENFORCED (the SDK refuses METADATA_ONLY foreign keys)" }]
+[per_object."netlify.main.builds"]
+ignore = [{ code = "VGI808", kind = "domain-exemption", reason = "the id column comes from a separate API call than sites (and deployments); a site or deploy can be deleted between scans, so the reference cannot be attested ENFORCED (the SDK refuses METADATA_ONLY foreign keys)" }, { code = "VGI809", kind = "domain-exemption", reason = "deploy_id in builds and functions both point at deployments.id, which comes from separate per-site API calls and cannot be attested ENFORCED" }]
+[per_object."netlify.main.deployments"]
+ignore = [{ code = "VGI808", kind = "domain-exemption", reason = "the id column comes from a separate API call than projects / builds; a site or build can be deleted between scans, so the reference cannot be attested ENFORCED (the SDK refuses METADATA_ONLY foreign keys)" }]
+[per_object."netlify.main.dns_records"]
+ignore = [{ code = "VGI808", kind = "domain-exemption", reason = "the id column comes from a separate API call than sites; a site can be deleted between scans, so the reference cannot be attested ENFORCED (the SDK refuses METADATA_ONLY foreign keys)" }]
+[per_object."netlify.main.dns_zones"]
+ignore = [{ code = "VGI808", kind = "domain-exemption", reason = "the id column comes from a separate API call than accounts / sites; a account or site can be deleted between scans, so the reference cannot be attested ENFORCED (the SDK refuses METADATA_ONLY foreign keys)" }]
+[per_object."netlify.main.domains"]
+ignore = [{ code = "VGI808", kind = "domain-exemption", reason = "the id column comes from a separate API call than projects; a site can be deleted between scans, so the reference cannot be attested ENFORCED (the SDK refuses METADATA_ONLY foreign keys)" }]
+[per_object."netlify.main.env_var_names"]
+ignore = [{ code = "VGI808", kind = "domain-exemption", reason = "the id column comes from a separate API call than projects; a site can be deleted between scans, so the reference cannot be attested ENFORCED (the SDK refuses METADATA_ONLY foreign keys)" }]
+[per_object."netlify.main.forms"]
+ignore = [{ code = "VGI808", kind = "domain-exemption", reason = "the id column comes from a separate API call than sites; a site can be deleted between scans, so the reference cannot be attested ENFORCED (the SDK refuses METADATA_ONLY foreign keys)" }]
+[per_object."netlify.main.functions"]
+ignore = [{ code = "VGI808", kind = "domain-exemption", reason = "the id column site_id comes from a separate API call than sites (a site can be deleted between scans); function_id is Netlify's bundle id, not a reference to this table's (site_id, deploy_id, name) key" }, { code = "VGI809", kind = "domain-exemption", reason = "deploy_id in builds and functions both point at deployments.id, which comes from separate per-site API calls and cannot be attested ENFORCED" }]
+[per_object."netlify.main.hooks"]
+ignore = [{ code = "VGI808", kind = "domain-exemption", reason = "the id column comes from a separate API call than sites / forms; a site or form can be deleted between scans, so the reference cannot be attested ENFORCED (the SDK refuses METADATA_ONLY foreign keys)" }]
+[per_object."netlify.main.projects"]
+ignore = [{ code = "VGI808", kind = "domain-exemption", reason = "the id column comes from a separate API call than accounts; a account can be deleted between scans, so the reference cannot be attested ENFORCED (the SDK refuses METADATA_ONLY foreign keys)" }]
+[per_object."netlify.main.sites"]
+ignore = [{ code = "VGI808", kind = "domain-exemption", reason = "the id column comes from a separate API call than accounts; a account can be deleted between scans, so the reference cannot be attested ENFORCED (the SDK refuses METADATA_ONLY foreign keys)" }]
+[per_object."netlify.main.split_tests"]
+ignore = [{ code = "VGI808", kind = "domain-exemption", reason = "the id column comes from a separate API call than sites; a site can be deleted between scans, so the reference cannot be attested ENFORCED (the SDK refuses METADATA_ONLY foreign keys)" }]
+[per_object."netlify.main.ssl_certificates"]
+ignore = [{ code = "VGI808", kind = "domain-exemption", reason = "the id column comes from a separate API call than sites; a site can be deleted between scans, so the reference cannot be attested ENFORCED (the SDK refuses METADATA_ONLY foreign keys)" }]
+[per_object."netlify.unified.runs"]
+ignore = [{ code = "VGI808", kind = "domain-exemption", reason = "run_id is this table's own primary key (the shared unified.runs shape), not a reference to another table" }]
