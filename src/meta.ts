@@ -108,17 +108,22 @@ export const CATALOG_DOC_MD =
   SOURCES_MD;
 
 export const SCHEMA_DOC_LLM =
-  "Netlify API v1 resources as catalog tables in netlify.main plus three table functions " +
-  "that take an id: deploy(deployment_id), build_logs(deployment_id) and form_submissions(form_id, " +
-  "include_contents := false). Account-wide tables: accounts, sites, projects, domains, dns_zones. Per-site " +
-  "tables (deployments, builds, forms, functions, ssl_certificates, env_var_names, hooks, build_hooks, " +
-  "split_tests) read every site, one request each, unless you filter on site / site_id (or project / project_id " +
-  "for the shared-vocabulary tables) — do that whenever you can. Per-account tables (build_stats, " +
-  "team_members, audit_events) accept account_id / account_slug. dns_records accepts zone_id / domain.";
+  "Netlify API v1 resources as catalog tables, plus three table functions that take an id (a deploy, its " +
+  "build log, or a form's submissions, whose contents are only returned on request). Resources fall into " +
+  "three scopes. Account-wide tables (accounts, sites, domains, DNS zones) are one listing each. Per-site " +
+  "tables (deploys, builds, forms, functions, certificates, environment variable names, hooks, split tests) " +
+  "read every site, one request each, unless you filter on site / site_id (or project / project_id in the " +
+  "tables that use the shared web-deploy vocabulary) — do that whenever you can. Per-account tables (build " +
+  "stats, team members, audit events) accept account_id / account_slug, and DNS records accept zone_id / domain.";
+
+export const SCHEMA_COMMENT =
+  "Netlify sites, deploys, builds, forms, functions, DNS, TLS, configuration and team data.";
 
 export const SCHEMA_DOC_MD =
-  "## main\n\nNetlify sites, deploys, builds, forms, functions, DNS, TLS, configuration and team data.\n\n" +
-  "- Filter per-site tables on `site` / `site_id` (`project` / `project_id` in the shared-vocabulary tables).\n" +
+  "## main\n\nEvery Netlify API v1 resource this worker reads, as tables, plus table functions for one " +
+  "deploy, its build log and a form's submissions.\n\n" +
+  "- Filter per-site tables on `site` / `site_id` (`project` / `project_id` in the shared-vocabulary tables); " +
+  "unfiltered, they make one request per site.\n" +
   "- `deployments` pushes `environment = 'production'`, `state`, `branch` into the API.";
 
 export const UNIFIED_DOC_LLM =
@@ -126,6 +131,8 @@ export const UNIFIED_DOC_LLM =
   "and CI worker (Airflow, Dagster, Prefect, Temporal, Databricks, dbt, GitHub, Vercel) uses, so you can " +
   "UNION ALL them: orchestrator, run_id, pipeline, status, raw_status, trigger, queued_at, started_at, " +
   "ended_at, duration_seconds, url.";
+
+export const UNIFIED_COMMENT = "Netlify deploys in the cross-orchestrator unified runs shape.";
 
 export const UNIFIED_DOC_MD =
   "## unified\n\nNetlify deploys as `runs`, in the column shape every orchestrator and CI worker shares, so " +
